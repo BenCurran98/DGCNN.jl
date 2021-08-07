@@ -12,7 +12,7 @@ using JSON
 using StaticArrays
 using TypedTables
 
-export parse_h5_data, parse_h5_dir, read_pred_file, convert_pc_labels, convert_dir_labels
+export parse_h5_data, parse_h5_dir, read_pred_file, convert_pc_labels, convert_dir_labels, read_pred_dir
 
 include("data.jl")
 
