@@ -1,32 +1,38 @@
-function parse_h5_data(filename::String; outfile::String = "")
+function get_data(data_dir, test_prop::Float64 = 0.2)
+    all_data = []
+    all_files = readdir(data_dir)
+    data_files = filter(f -> f[end - 3:end] == ".txt", all_files)
+    for f in data_files
+        data = readdlm(f, Float64)
+        points = data[:, 1:3]
+        labels = Int.(data[:, 4])
+        push!(all_data, (points, labels))
+    end
+    rng = MersenneTwister(420)
+    sorted_idxs = shuffle!(rng, 1:length(all_data))
+    training_data = all_data[1:floor((length(all_data) * (1 - test_prop)))]
+    test_data = all_data[floor((length(all_data) * (1 - test_prop))) + 1:end]
+    return training_data, test_data
+end
+
+function process_pc(filename::String, converted_labels_file::String, outfile::String; class_map::Dict{Int, Int} = POWERCOR_CLASS_MAP)
+    convert_pc_labels(filename, converted_labels_file, class_map = class_map)
+    parse_pc_data(converted_labels_file; outfile = outfile)
+end
+
+function process_pc_dir(orig_dir::String, tiles_dir::String, outdir::String, tile_size::Real; class_map::Dict{Int, Int} = POWERCOR_CLASS_MAP)
+    split_tile_dir(orig_dir, tiles_dir, tile_size)
+    tile_files = readdir(tiles_dir)
+    for file in tile_files
+        process_pc(joinpath(tiles_dir, tile), joinpath(tiles_dir, tile), joinpath(outdir, split(file, ".", keepempty=false)[1] * ".txt"); class_map = class_map)
+    end
+end
+
+function parse_pc_data(filename::String; outfile::String = "")
     pc = load_h5(filename)
-    xs = map(p -> p[1], pc.position)
-    ys = map(p -> p[2], pc.position)
-    zs = map(p -> p[3], pc.position)
-    
-    # rs = map(c -> red(c), pc.color)
-    # gs = map(c -> green(c), pc.color)
-    # bs = map(c -> blue(c), pc.color)
+    pc = pc[findall(map(c -> !(c in values(POWERCOR_CLASS_MAP))))]
 
-    rs = zeros(length(pc))
-    gs = zeros(length(pc))
-    bs = zeros(length(pc))
-
-    classifications = copy(pc.classification)
-    @info "Classes: $(unique(classifications))"
-    # classifications[findall(pc.classification .== 6)] .= 1
-    # classifications[findall(pc.classification .== 5)] .= 3
-    # classifications[findall(pc.classification .== 14)] .= 1
-    # classifications[findall(pc.classification .== 17)] .= 1
-    # classifications = map(c -> c - 1, classifications)
-    # # classifications[findall((pc.classification .== 2))] .= 3
-    # # classifications[findall((map(c -> c ∉ [1, 2, 4, 5], classifications)))] .= 3
-    # classifications[findall(pc.classification .== 3)] .= 2
-    # @info "Final: $(unique(classifications))"
-    
-    data = hcat(
-        xs, ys, zs, rs, gs, bs, pc.point_source_id, zeros(length(pc)), zeros(length(pc)), zeros(length(pc)), pc.numberofreturns, pc.returnnumber, pc.gps_time, pc.intensity, classifications
-    )
+    data = dgcnn.points_to_matrix(pc.position, pc.classification)
 
     if outfile != ""
         open(outfile, "w") do io
@@ -39,123 +45,36 @@ function parse_h5_data(filename::String; outfile::String = "")
     return data
 end
 
-function parse_h5_dir(dir::String)
+function parse_pc_dir(dir::String)
     all_files = readdir(dir)
     to_process = filter(f -> f[end - 2:end] == ".h5", all_files)
     n = 1
     for f ∈ to_process
         @info "$n/$(length(to_process))"
         n += 1
-        parse_h5_data(joinpath(dir, f); outfile = joinpath(dir, f[1:end - 3] * ".txt"))
+        parse_pc_data(joinpath(dir, f); outfile = joinpath(dir, f[1:end - 3] * ".txt"))
     end
 end
 
-function read_pred_file(filename::String, outfile::String = "pred.las")
-    data = readdlm(filename)
-    points = map(i -> Point3(data[i, 1:3]...), 1:size(data)[1])
-    classification = data[:, 7]
-    pc = Table(position = points, classification = classification)
-    save_las(outfile, pc)
-    return pc
-end
-
-function read_pred_dir(dir::String, join::Bool = true)
-    all_files = readdir(dir)
-    pred_files = filter(f -> f[end - 11:end] == "_pred_gt.txt", all_files)
-    pc = nothing
-    pc_ground_truth = nothing
-    pc_comp = nothing
-    for filename in pred_files
-        @show filename
-        this_pc = read_pred_file(joinpath(dir, filename), "pred_$(filename[1:end - 7]).las")
-        ground_truth_labels = vec(readdlm(joinpath(dir, filename[1:end - 12] * "_true_labels.txt")))
-        @show length(this_pc)
-        @show size(ground_truth_labels)
-        this_pc_ground_truth = Table(this_pc, classification = ground_truth_labels)
-        save_las("ground_truth_$(filename[1:end - 7]).las", this_pc_ground_truth)
-
-        # truth      | predicted  | class label
-        # ground     | building   | 4
-        # ground     | vegetation | 5
-        # building   | ground     | 6
-        # building   | vegetation | 7
-        # vegetation | ground     | 8
-        # vegetation | building   | 9
-
-        comp_classes = 9 * ones(Int, length(this_pc))
-        comp_classes[findall((this_pc_ground_truth.classification .== 0) .& (this_pc.classification .== 1))] .= 3
-        comp_classes[findall((this_pc_ground_truth.classification .== 0) .& (this_pc.classification .== 2))] .= 4
-        comp_classes[findall((this_pc_ground_truth.classification .== 1) .& (this_pc.classification .== 0))] .= 5
-        comp_classes[findall((this_pc_ground_truth.classification .== 1) .& (this_pc.classification .== 2))] .= 6
-        comp_classes[findall((this_pc_ground_truth.classification .== 2) .& (this_pc.classification .== 0))] .= 7
-        comp_classes[findall((this_pc_ground_truth.classification .== 2) .& (this_pc.classification .== 1))] .= 8
-        this_pc_comp = Table(this_pc, classification = comp_classes)
-        save_las("class_compare_$(filename[1:end - 7]).las", this_pc_comp)
-
-        if join
-            if isnothing(pc)
-                pc = this_pc
-                pc_ground_truth = this_pc_ground_truth
-                pc_comp = this_pc_comp
-            else
-                if !isnothing(this_pc)
-                    pc = vcat(pc, this_pc)
-                    pc_ground_truth = vcat(pc_ground_truth, this_pc_ground_truth)
-                    pc_comp = vcat(pc_comp, this_pc_comp)
-                end
-            end
-        end
-    end
-    if join
-        save_las("pred_tnris_pc.las", pc)
-        save_las("pc_tnris_ground_truth.las", pc_ground_truth)
-        save_las("pc_tnris_comp.las", pc_comp)
-    end
-    return pc, pc_ground_truth, pc_comp
-end
-
-function convert_pc_labels(file::String, outfile::String, labels_json::String = "/home/ben/InnovationConference/AHN3-dgcnn.pytorch/params/categories.json")
-    # pc = load_h5(file)
-    pc = load_las(file)
-    # TNRIS
-    pc = pc[findall(map(p -> p.classification ∈ [2, 3, 4, 5, 6], pc))]
-    @show unique(pc.classification)
+function convert_pc_labels(filename::String, outfile::String; class_map::Dict{Int, Int} = POWERCOR_CLASS_MAP)
+    pc = dgcnn.load_pointcloud(filename)
+    pc = pc[findall(map(c -> c in collect(keys(class_map)), pc.classification))]
     pc = Table(pc, intensity = Float64.(pc.intensity))
-    new_pc = copy(pc)
-    class_dict = JSON.parsefile(labels_json, null = missing)
-    classes = Int.(parse.(Float64, (sort(collect(keys(class_dict)), by = k -> class_dict[k]))))
-    # @show map(i -> class_dict[classes[i]], 1:length(classes))
-    # @show classes
-    classifications = copy(pc.classification)
-    # POWERCOR
-    # classifications[findall(pc.classification .== 1)] .= 0
-    # classifications[findall(pc.classification .== 2)] .= 1
-    # classifications[findall(pc.classification .== 4)] .= 2
-    # classifications[findall(pc.classification .== 5)] .= 2
-    
-    # TNRIS
-    classifications[findall(pc.classification .== 6)] .= 0
-    classifications[findall(pc.classification .== 3)] .= 2
-    classifications[findall(pc.classification .== 4)] .= 2
-    classifications[findall(pc.classification .== 5)] .= 2
-    classifications[findall(pc.classification .== 2)] .= 1
-    # classifications[findall(pc.classification .== 14)] .= 1
-    # classifications[findall(pc.classification .== 17)] .= 1
 
-    # classifications[findall((pc.classification .== 4))] .= 3
-    # classifications[findall((map(c -> c ∉ [1, 3, 5, 7], classifications)))] .= 0
-    # new_classes = zeros(length(classifications))
-    # for i ∈ 1:length(classes)
-    #     new_classes[findall(classifications .== classes[i])] .= i
-    #     new_pc = Table(new_pc, classification = new_classes)
-    # end
+    classifications = zeros(length(pc))
+    for lab in unique(collect(keys(class_map)))
+        classifications[findall(pc.classification .== lab)] .= class_map[lab]
+    end
+    
     new_pc = Table(new_pc, classification = classifications)
     @show unique(new_pc.classification) 
     save_h5(outfile[1:end - 4] * ".h5", new_pc)
     save_las(outfile, new_pc)
 end
 
-function convert_dir_labels(dir::String, outdir::String, labels_json::String = "/home/ben/InnovationConference/AHN3-dgcnn.pytorch/params/categories.json")
+
+
+function convert_dir_labels(dir::String, outdir::String; class_map::Dict{Int, Int} = POWERCOR_CLASS_MAP)
     all_files = readdir(dir)
     h5files = filter(f -> f[end - 3:end] == ".las", all_files)
     if !isdir(outdir)
@@ -164,8 +83,9 @@ function convert_dir_labels(dir::String, outdir::String, labels_json::String = "
 
     n = 1
     for file ∈ h5files
-        @show file
-        convert_pc_labels(joinpath(dir, file), joinpath(outdir, "Area_$n.las"), labels_json)
+        @info "$n/$(length(h5files))"
+        convert_pc_labels(joinpath(dir, file), joinpath(outdir, "Area_$n.las"); class_map = class_map)
+        GC.gc()
         n += 1
     end
 end
@@ -180,14 +100,10 @@ function split_boundingbox(bb::BoundingBox, tile_size::Real)
     if !(bb.ymax in ys)
         push!(ys, bb.ymax)
     end
-    # @show maximum(xs)
 
-    # @show xs
-    # @show ys
     bbs = Vector{BoundingBox}()
     for i ∈ 1:length(xs) - 1
         for j in 1:length(ys) - 1
-            # @show xs[i], ys[j], xs[i + 1], ys[j + 1]
             this_bb = BoundingBox(xs[i], ys[j], bb.zmin, xs[i + 1], ys[j + 1], bb.zmax)
             push!(bbs, this_bb)
         end
@@ -208,13 +124,13 @@ function split_tile(filename::String, tile_size::Real; tile_file_base::String = 
     end
 end
     
-function split_tile_dir(dir::String, tile_size::Real)
+function split_tile_dir(dir::String, outdir::String, tile_size::Real)
     all_files = readdir(dir)
     las_files = filter(f -> f[end - 3:end] == ".las", all_files)
     for i ∈ 1:length(las_files)
         @info "file: $i/$(length(las_files))"
         tile_file_base = "Area_$i"
-        split_tile(joinpath(dir, las_files[i]), tile_size; tile_file_base = joinpath(dir, tile_file_base))
+        split_tile(joinpath(dir, las_files[i]), tile_size; tile_file_base = joinpath(outdir, tile_file_base))
     end
 end
 
