@@ -122,5 +122,7 @@ function (model::Dgcnn_classifier)(data)
     data = model.drop(data)
     data = model.fc(data)
     # data: (N, num_classes, B)
+    data = softmax(data, dims = 2)
+    # data: (N, num_classes, B)
     return data
 end

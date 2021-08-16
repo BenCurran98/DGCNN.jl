@@ -6,10 +6,14 @@ function train!(model, training_data_loader, test_data_loader, loss, opt, epochs
         @info "Training for epoch $epoch"
         training_loss = 0
         for batch in training_data_loader
-            data, labels = batch
+            data, labels, mask = batch
             pred = model(data)
+            pred = maximum(pred, dims = 2)
+            pred = reshape(pred, (size(pred)[1] * size(pred)[3]))
+            focus_preds = pred[findall(mask)]
+            focus_labels = labels[findall(mask)]
             gs = gradient(params) do 
-                this_round_loss = loss(pred, labels)
+                this_round_loss = loss(focus_pred, focus_labels)
                 training_loss += this_round_loss
                 return  training_loss
             end

@@ -1,18 +1,45 @@
-function get_data(data_dir, test_prop::Float64 = 0.2)
+function get_data(data_dir; sample_points::Int = 5000, num_train_points::Int = 5000, test_prop::Float64 = 0.2, training_batch_size::Int = 8, test_batch_size::Int = 8)
     all_data = []
     all_files = readdir(data_dir)
     data_files = filter(f -> f[end - 3:end] == ".txt", all_files)
     for f in data_files
         data = readdlm(f, Float64)
+        rng = MersenneTwister(4321)
+        sample_idxs = shuffle!(rng, 1:size(data)[1])
+        data = data[sample_idxs[1:sample_points], :]
         points = data[:, 1:3]
         labels = Int.(data[:, 4])
-        push!(all_data, (points, labels))
+        mask = DGCNN.get_training_mask(labels, num_points)
+        push!(all_data, (points, labels, mask))
     end
     rng = MersenneTwister(420)
     sorted_idxs = shuffle!(rng, 1:length(all_data))
-    training_data = all_data[1:floor((length(all_data) * (1 - test_prop)))]
-    test_data = all_data[floor((length(all_data) * (1 - test_prop))) + 1:end]
-    return training_data, test_data
+    training_data = all_data[sorted_idxs[1:floor((length(all_data) * (1 - test_prop)))]]
+    test_data = all_data[sorted_idxs[floor((length(all_data) * (1 - test_prop))) + 1:end]]
+
+    num_training_batches = floor(length(training_data)/training_batch_size)
+    num_test_batches = floor(length(test_data)/test_batch_size)
+
+    training_batches = []
+    for training_batch_num in 1:num_training_batches
+        this_batch_training_data = training_data[(training_batch_num - 1) * num_training_batches + 1:training_batch_num * num_training_batches]
+        batch_data = cat(map(data -> reshape(data[1], (size(data[1])[1], size(data[1])[2], 1)), this_batch_training_data)..., dims = 3)
+        batch_labels = cat(map(data -> data[2], this_batch_training_data)..., dims = 1)
+        batch_masks = cat(map(data -> data[2], this_batch_training_data)..., dims = 1)
+        this_batch = (batch_data, batch_labels, batch_masks)
+        push!(training_batches, this_batch)
+    end
+
+    test_batches = []
+    for test_batch_num in 1:num_test_batches
+        this_batch_test_data = test_data[(test_batch_num - 1) * num_test_batches + 1:test_batch_num * num_test_batches]
+        batch_data = cat(map(data -> reshape(data[1], (size(data[1])[1], size(data[1])[2], 1)), this_batch_test_data)..., dims = 3)
+        batch_labels = cat(map(data -> data[2], this_batch_test_data)..., dims = 1)
+        # no mask needed for test sets
+        this_batch = (batch_data, batch_labels)
+        push!(test_batches, this_batch)
+    end
+    return training_batches, test_batches
 end
 
 function process_pc(filename::String, converted_labels_file::String, outfile::String; class_map::Dict{Int, Int} = POWERCOR_CLASS_MAP)
@@ -20,19 +47,31 @@ function process_pc(filename::String, converted_labels_file::String, outfile::St
     parse_pc_data(converted_labels_file; outfile = outfile)
 end
 
-function process_pc_dir(orig_dir::String, tiles_dir::String, outdir::String, tile_size::Real; class_map::Dict{Int, Int} = POWERCOR_CLASS_MAP)
-    split_tile_dir(orig_dir, tiles_dir, tile_size)
-    tile_files = readdir(tiles_dir)
+function process_pc_dir(orig_dir::String, tmp_tiles_dir::String, tiles_dir::String, outdir::String, tile_size::Real; class_map::Dict{Int, Int} = POWERCOR_CLASS_MAP)
+    if !isdir(tiles_dir)
+        mkpath(tiles_dir)
+    end
+    if !isdir(outdir)
+        mkpath(outdir)
+    end
+    # split_tile_dir(orig_dir, tiles_dir, tile_size)
+    all_tile_files = readdir(tmp_tiles_dir)
+    tile_files = filter(f -> f[end - 3:end] == ".las", all_tile_files)
+    n = 1
     for file in tile_files
-        process_pc(joinpath(tiles_dir, tile), joinpath(tiles_dir, tile), joinpath(outdir, split(file, ".", keepempty=false)[1] * ".txt"); class_map = class_map)
+        @show file
+        @info "$n/$(length(tile_files))"
+        process_pc(joinpath(tmp_tiles_dir, file), joinpath(tiles_dir, file), joinpath(outdir, split(file, ".", keepempty=false)[1] * ".txt"); class_map = class_map)
+        GC.gc()
+        n += 1
     end
 end
 
 function parse_pc_data(filename::String; outfile::String = "")
-    pc = load_h5(filename)
-    pc = pc[findall(map(c -> !(c in values(POWERCOR_CLASS_MAP))))]
+    pc = load_pointcloud(filename)
+    pc = pc[findall(map(c -> c in values(POWERCOR_CLASS_MAP), unique(pc.classification)))]
 
-    data = dgcnn.points_to_matrix(pc.position, pc.classification)
+    data = DGCNN.points_to_matrix(pc.position, pc.classification)
 
     if outfile != ""
         open(outfile, "w") do io
@@ -57,7 +96,7 @@ function parse_pc_dir(dir::String)
 end
 
 function convert_pc_labels(filename::String, outfile::String; class_map::Dict{Int, Int} = POWERCOR_CLASS_MAP)
-    pc = dgcnn.load_pointcloud(filename)
+    pc = DGCNN.load_pointcloud(filename)
     pc = pc[findall(map(c -> c in collect(keys(class_map)), pc.classification))]
     pc = Table(pc, intensity = Float64.(pc.intensity))
 
@@ -66,7 +105,7 @@ function convert_pc_labels(filename::String, outfile::String; class_map::Dict{In
         classifications[findall(pc.classification .== lab)] .= class_map[lab]
     end
     
-    new_pc = Table(new_pc, classification = classifications)
+    new_pc = Table(pc, classification = classifications)
     @show unique(new_pc.classification) 
     save_h5(outfile[1:end - 4] * ".h5", new_pc)
     save_las(outfile, new_pc)
