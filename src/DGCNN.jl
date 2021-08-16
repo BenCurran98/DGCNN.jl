@@ -16,6 +16,7 @@ using ProgressMeter
 using StaticArrays
 using Statistics
 using Random
+using TensorBoardLogger
 using TypedTables
 using UUIDs
 using Zygote

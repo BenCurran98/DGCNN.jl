@@ -93,10 +93,13 @@ function process_pc_dir(orig_dir::String, tmp_tiles_dir::String, tiles_dir::Stri
     if !isdir(tiles_dir)
         mkpath(tiles_dir)
     end
+    if !isdir(tmp_tiles_dir)
+        mkpath(tmp_tiles_dir)
+    end
     if !isdir(outdir)
         mkpath(outdir)
     end
-    split_tile_dir(orig_dir, tiles_dir, tile_size)
+    split_tile_dir(orig_dir, tmp_tiles_dir, tile_size)
     all_tile_files = readdir(tmp_tiles_dir)
     tile_files = filter(f -> f[end - 3:end] == ".las", all_tile_files)
     n = 1
