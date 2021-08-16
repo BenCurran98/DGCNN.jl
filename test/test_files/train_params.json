@@ -1,0 +1,8 @@
+{
+    "loss": "cross_entropy",
+    "opt": {
+        "name": "ADAM"
+    },
+    "epochs": 30,
+    "model_dir": "test/model_store"
+}

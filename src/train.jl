@@ -1,7 +1,16 @@
-function train!(model, training_data_loader, test_data_loader, loss, opt, epochs)
+function train!(model, training_data_loader, test_data_loader, loss, opt, epochs; scheduler = nothing, model_dir::String = "./model_store/")
     model_params = params(model)
     model_params = Zygote.Params(model_params)
-    for epoch in 1:epochs
+
+    if !isdir(model_dir)
+        mkpath(model_dir)
+    end
+
+    # make a unique subfolder to store the model timestamps in
+    this_model_dir = joinpath(model_dir, "model_$(UUIDs.uuid4())")
+    mkdir(this_model_dir)
+
+    @showprogress "Training..." for epoch in 1:epochs
         training_accuracies = []
         @info "Training for epoch $epoch"
         training_loss = 0
@@ -22,6 +31,13 @@ function train!(model, training_data_loader, test_data_loader, loss, opt, epochs
         end
         @info "Mean Train Loss = $(mean(training_loss)), Mean Train Accuracy = $(mean(training_accuracies))"
         @info "Testing for epoch $epoch"
+
+        if !isnothing(schedule)
+            opt.eta = next!(schedule)
+        end
+
+        # save the model
+        @save "dgcnn_model_epoch_$(epoch).bson" model
         
         test_loss = 0
         test_accuracies = []
@@ -36,7 +52,7 @@ function train!(model, training_data_loader, test_data_loader, loss, opt, epochs
     end
 end
 
-function train_from_dir!(model, dir::String, loss, opt, epochs; test_prop::Float64 = 0.2)
-    training_data, test_data = DGCNN.get_data(dir, test_prop)
+function train_from_dir!(model, dir::String, loss, opt, epochs; sample_points::Int = 100000, num_points = 5000, test_prop::Float64 = 0.2)
+    training_data, test_data = DGCNN.get_data(dir; sample_points = sample_points, num_points = num_points, test_prop = test_prop)
     train!(model, training_data, test_data, loss, opt, epochs)
 end

@@ -1,38 +1,80 @@
-function get_data(data_dir; sample_points::Int = 5000, num_train_points::Int = 5000, test_prop::Float64 = 0.2, training_batch_size::Int = 8, test_batch_size::Int = 8)
+function extract_boxes(data::AbstractArray, box_size::Real = 30, num_box_samples::Int = 3; classes::Vector{Int} = [1, 2, 3, 4, 5], class_min::Int = 100)
+    box_samples = Vector{AbstractArray}()
+    while length(box_samples) < num_box_samples
+        centre = rand(collect(1:size(data, 1)))
+        bb = BoundingBox(
+            centre[1] - box_size/2, 
+            centre[2] - box_size/2,
+            -Inf,
+            centre[1] + box_size/2,
+            centre[2] + box_size/2,
+            Inf
+        )
+
+        sample_idxs = findall(map(i -> data[i, 1:3] in bb))
+        sample_data = data[sample_idxs]
+        class_counts = map(c -> count(sample_data[:, 4] .== c), classes)
+        if all(class_counts .>= class_min)
+            push!(box_samples, sample_data) 
+        end
+    end
+    return box_samples
+end
+
+function get_data(data_dir; 
+                    sample_points::Int = 5000, 
+                    num_points::Int = 5000, 
+                    test_prop::Float64 = 0.2, 
+                    num_box_samples::Int = 3,
+                    box_size::Real = 30,
+                    class_min::Int = 100, 
+                    classes::Vector{Int} = [1, 2, 3, 4, 5], 
+                    training_batch_size::Int = 8, 
+                    test_batch_size::Int = 8)
     all_data = []
     all_files = readdir(data_dir)
     data_files = filter(f -> f[end - 3:end] == ".txt", all_files)
-    for f in data_files
-        data = readdlm(f, Float64)
-        rng = MersenneTwister(4321)
-        sample_idxs = shuffle!(rng, 1:size(data)[1])
-        data = data[sample_idxs[1:sample_points], :]
-        points = data[:, 1:3]
-        labels = Int.(data[:, 4])
-        mask = DGCNN.get_training_mask(labels, num_points)
-        push!(all_data, (points, labels, mask))
+    rng = MersenneTwister(4321)
+    @showprogress "Loading Data Minibatches..." for f in data_files
+        data = readdlm(joinpath(data_dir, f), Float64)
+        class_counts = map(c -> count(data[:, 4] .== c), classes)
+        @show class_counts
+        if !all(class_counts .> class_min * 3)
+            @info "Unbalanced!"
+            continue
+        end
+        box_samples = extract_boxes(data, box_size, num_box_samples; classes = classes, class_min = class_min)
+        for box_data ∈ box_samples    
+            sample_idxs = shuffle!(rng, collect(1:size(box_data, 1)))
+            box_data = box_data[sample_idxs[1:sample_points], :]
+            points = box_data[:, 1:3]
+            labels = Int.(box_data[:, 4])
+            mask = DGCNN.get_training_mask(labels, num_points)
+            push!(all_data, (points, labels, mask))
+        end
     end
     rng = MersenneTwister(420)
-    sorted_idxs = shuffle!(rng, 1:length(all_data))
-    training_data = all_data[sorted_idxs[1:floor((length(all_data) * (1 - test_prop)))]]
-    test_data = all_data[sorted_idxs[floor((length(all_data) * (1 - test_prop))) + 1:end]]
+    sorted_idxs = shuffle!(rng, collect(1:length(all_data)))
+    training_data = all_data[sorted_idxs[1:floor(Int, (length(all_data) * (1 - test_prop)))]]
+    test_data = all_data[sorted_idxs[floor(Int, (length(all_data) * (1 - test_prop))) + 1:end]]
 
-    num_training_batches = floor(length(training_data)/training_batch_size)
-    num_test_batches = floor(length(test_data)/test_batch_size)
+    num_training_batches = floor(Int, length(training_data)/training_batch_size)
+    num_test_batches = floor(Int, length(test_data)/test_batch_size)
 
     training_batches = []
-    for training_batch_num in 1:num_training_batches
-        this_batch_training_data = training_data[(training_batch_num - 1) * num_training_batches + 1:training_batch_num * num_training_batches]
+    @showprogress "Batching Training Data..." for training_batch_num in 1:num_training_batches
+        this_batch_training_data = training_data[(training_batch_num - 1) * training_batch_size + 1:training_batch_num * training_batch_size]
         batch_data = cat(map(data -> reshape(data[1], (size(data[1])[1], size(data[1])[2], 1)), this_batch_training_data)..., dims = 3)
+        @show size(batch_data)
         batch_labels = cat(map(data -> data[2], this_batch_training_data)..., dims = 1)
-        batch_masks = cat(map(data -> data[2], this_batch_training_data)..., dims = 1)
+        batch_masks = cat(map(data -> data[3], this_batch_training_data)..., dims = 1)
         this_batch = (batch_data, batch_labels, batch_masks)
         push!(training_batches, this_batch)
     end
 
     test_batches = []
-    for test_batch_num in 1:num_test_batches
-        this_batch_test_data = test_data[(test_batch_num - 1) * num_test_batches + 1:test_batch_num * num_test_batches]
+    @showprogress "Batching Test Data..." for test_batch_num in 1:num_test_batches
+        this_batch_test_data = test_data[(test_batch_num - 1) * test_batch_size + 1:test_batch_num * test_batch_size]
         batch_data = cat(map(data -> reshape(data[1], (size(data[1])[1], size(data[1])[2], 1)), this_batch_test_data)..., dims = 3)
         batch_labels = cat(map(data -> data[2], this_batch_test_data)..., dims = 1)
         # no mask needed for test sets
@@ -54,7 +96,7 @@ function process_pc_dir(orig_dir::String, tmp_tiles_dir::String, tiles_dir::Stri
     if !isdir(outdir)
         mkpath(outdir)
     end
-    # split_tile_dir(orig_dir, tiles_dir, tile_size)
+    split_tile_dir(orig_dir, tiles_dir, tile_size)
     all_tile_files = readdir(tmp_tiles_dir)
     tile_files = filter(f -> f[end - 3:end] == ".las", all_tile_files)
     n = 1
@@ -69,9 +111,16 @@ end
 
 function parse_pc_data(filename::String; outfile::String = "")
     pc = load_pointcloud(filename)
-    pc = pc[findall(map(c -> c in values(POWERCOR_CLASS_MAP), unique(pc.classification)))]
+    pc = pc[findall(map(c -> c in keys(POWERCOR_CLASS_MAP), pc.classification))]
+
+    class_counts = map(c -> count(pc.classification .== c), unique(pc.classification))
+    if !all(class_counts .> 100)
+        return nothing
+        GC.gc()
+    end
 
     data = DGCNN.points_to_matrix(pc.position, pc.classification)
+    @show size(data)
 
     if outfile != ""
         open(outfile, "w") do io
