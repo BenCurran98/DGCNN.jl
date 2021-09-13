@@ -9,12 +9,12 @@ function get_training_mask(labels::AbstractArray, num_points::Int)
     min_class_count = minimum(class_counts)
     num_points = min(min_class_count, num_points)
     rng = MersenneTwister(1234)
-    mask = zeros(Int, size(labels))
+    mask = zeros(Bool, size(labels))
     for class in unique_labels
         this_class_idxs = findall(labels .== class)
         shuffled_idxs = shuffle!(rng, this_class_idxs)
         selected_idxs = shuffled_idxs[1:num_points]
-        mask[selected_idxs] .= 1
+        mask[selected_idxs] .= true
     end
     return mask
 end
@@ -38,3 +38,5 @@ function points_to_matrix(points::Vector{Point3}, classification::Vector{I}) whe
     end
     return data_mat
 end
+
+# function shared_range()

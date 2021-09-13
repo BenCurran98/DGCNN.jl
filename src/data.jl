@@ -1,7 +1,7 @@
 function extract_boxes(data::AbstractArray, box_size::Real = 30, num_box_samples::Int = 3; classes::Vector{Int} = [1, 2, 3, 4, 5], class_min::Int = 100)
     box_samples = Vector{AbstractArray}()
     while length(box_samples) < num_box_samples
-        centre = rand(collect(1:size(data, 1)))
+        centre = data[rand(collect(1:size(data, 1))), 1:3]
         bb = BoundingBox(
             centre[1] - box_size/2, 
             centre[2] - box_size/2,
@@ -11,9 +11,10 @@ function extract_boxes(data::AbstractArray, box_size::Real = 30, num_box_samples
             Inf
         )
 
-        sample_idxs = findall(map(i -> data[i, 1:3] in bb))
-        sample_data = data[sample_idxs]
+        sample_idxs = findall(map(i -> data[i, 1:3] in bb, 1:size(data, 1)))
+        sample_data = data[sample_idxs, :]
         class_counts = map(c -> count(sample_data[:, 4] .== c), classes)
+        # @show class_counts
         if all(class_counts .>= class_min)
             push!(box_samples, sample_data) 
         end
@@ -35,24 +36,31 @@ function get_data(data_dir;
     all_files = readdir(data_dir)
     data_files = filter(f -> f[end - 3:end] == ".txt", all_files)
     rng = MersenneTwister(4321)
-    @showprogress "Loading Data Minibatches..." for f in data_files
-        data = readdlm(joinpath(data_dir, f), Float64)
-        class_counts = map(c -> count(data[:, 4] .== c), classes)
-        @show class_counts
-        if !all(class_counts .> class_min * 3)
-            @info "Unbalanced!"
+    @info "Start loop"
+
+    m = 1
+    @showprogress 0.01 "Loading Data Minibatches..." for f in data_files[1:100]
+        data = readdlm(joinpath(data_dir, f), Float32)
+
+        class_counts = map(c -> count(data[:, 4] .== c), sort!(classes))
+
+        if count(class_counts .> class_min) < 3
             continue
         end
-        box_samples = extract_boxes(data, box_size, num_box_samples; classes = classes, class_min = class_min)
-        for box_data ∈ box_samples    
-            sample_idxs = shuffle!(rng, collect(1:size(box_data, 1)))
-            box_data = box_data[sample_idxs[1:sample_points], :]
-            points = box_data[:, 1:3]
-            labels = Int.(box_data[:, 4])
-            mask = DGCNN.get_training_mask(labels, num_points)
-            push!(all_data, (points, labels, mask))
+
+        if size(data, 1) < sample_points
+            continue
         end
+        sample_idxs = shuffle!(rng, collect(1:size(data, 1)))
+        data = data[sample_idxs[1:sample_points], :]
+        points = data[:, 1:3]
+        labels = Int.(data[:, 4])
+        mask = DGCNN.get_training_mask(labels, num_points)
+        mask = repeat(reshape(mask, (1, size(mask, 1))), length(classes), 1)        
+
+        push!(all_data, (points, labels, mask))
     end
+    @show length(all_data)
     rng = MersenneTwister(420)
     sorted_idxs = shuffle!(rng, collect(1:length(all_data)))
     training_data = all_data[sorted_idxs[1:floor(Int, (length(all_data) * (1 - test_prop)))]]
@@ -62,21 +70,30 @@ function get_data(data_dir;
     num_test_batches = floor(Int, length(test_data)/test_batch_size)
 
     training_batches = []
-    @showprogress "Batching Training Data..." for training_batch_num in 1:num_training_batches
+    @showprogress 0.1 "Batching Training Data..." for training_batch_num in 1:num_training_batches
         this_batch_training_data = training_data[(training_batch_num - 1) * training_batch_size + 1:training_batch_num * training_batch_size]
-        batch_data = cat(map(data -> reshape(data[1], (size(data[1])[1], size(data[1])[2], 1)), this_batch_training_data)..., dims = 3)
-        @show size(batch_data)
-        batch_labels = cat(map(data -> data[2], this_batch_training_data)..., dims = 1)
-        batch_masks = cat(map(data -> data[3], this_batch_training_data)..., dims = 1)
+        batch_data = cat(map(data -> reshape(data[1], (size(data[1], 1), size(data[1], 2), 1)), this_batch_training_data)..., dims = 3)
+        batch_data = convert(Array{Float32, 3}, batch_data)
+        # @show size(batch_data)
+        batch_labels = map(data -> onehotbatch(data[2], classes), this_batch_training_data)
+        batch_labels = cat(map(labels -> reshape(labels, (size(labels, 1), size(labels, 2), 1)), batch_labels)..., dims = 3)
+        # batch_labels = cat(map(data -> onehotbatch(data[2], classes), this_batch_training_data)..., dims = 3)
+
+        batch_masks = cat(map(data -> reshape(data[3], (size(data[3], 1), size(data[3], 2), 1)), this_batch_training_data)..., dims = 3)
+
+        # batch_masks = cat(map(data -> data[3], this_batch_training_data)..., dims = 1)
         this_batch = (batch_data, batch_labels, batch_masks)
         push!(training_batches, this_batch)
     end
 
     test_batches = []
-    @showprogress "Batching Test Data..." for test_batch_num in 1:num_test_batches
+    @showprogress 0.1 "Batching Test Data..." for test_batch_num in 1:num_test_batches
         this_batch_test_data = test_data[(test_batch_num - 1) * test_batch_size + 1:test_batch_num * test_batch_size]
         batch_data = cat(map(data -> reshape(data[1], (size(data[1])[1], size(data[1])[2], 1)), this_batch_test_data)..., dims = 3)
-        batch_labels = cat(map(data -> data[2], this_batch_test_data)..., dims = 1)
+        batch_data = convert(Array{Float32, 3}, batch_data)
+        # batch_labels = cat(map(data -> data[2], this_batch_test_data)..., dims = 1)
+        batch_labels = map(data -> onehotbatch(data[2], classes), this_batch_test_data)
+        batch_labels = cat(map(labels -> reshape(labels, (size(labels, 1), size(labels, 2), 1)), batch_labels)..., dims = 3)
         # no mask needed for test sets
         this_batch = (batch_data, batch_labels)
         push!(test_batches, this_batch)
@@ -114,7 +131,7 @@ end
 
 function parse_pc_data(filename::String; outfile::String = "")
     pc = load_pointcloud(filename)
-    pc = pc[findall(map(c -> c in keys(POWERCOR_CLASS_MAP), pc.classification))]
+    pc = pc[findall(map(c -> c in values(POWERCOR_CLASS_MAP), pc.classification))]
 
     class_counts = map(c -> count(pc.classification .== c), unique(pc.classification))
     if !all(class_counts .> 100)
@@ -122,6 +139,7 @@ function parse_pc_data(filename::String; outfile::String = "")
         GC.gc()
     end
 
+    @show unique(pc.classification)
     data = DGCNN.points_to_matrix(pc.position, pc.classification)
     @show size(data)
 
@@ -159,7 +177,7 @@ function convert_pc_labels(filename::String, outfile::String; class_map::Dict{In
     
     new_pc = Table(pc, classification = classifications)
     @show unique(new_pc.classification) 
-    save_h5(outfile[1:end - 4] * ".h5", new_pc)
+    # save_h5(outfile[1:end - 4] * ".h5", new_pc)
     save_las(outfile, new_pc)
 end
 
@@ -202,7 +220,7 @@ function split_boundingbox(bb::BoundingBox, tile_size::Real)
     return bbs
 end
 
-function split_tile(filename::String, tile_size::Real; tile_file_base::String = "tile")
+function split_tile(filename::String, tile_size::Real; tile_file_base::String = "tile", class_min::Int = 100, classes::Vector{Int} = [1, 2, 3, 4, 5])
     pc = load_las(filename)
     bb = boundingbox(pc.position)
     bbs = split_boundingbox(bb, tile_size)
@@ -210,8 +228,11 @@ function split_tile(filename::String, tile_size::Real; tile_file_base::String = 
         @info "$i/$(length(bbs))"
         tile_pc = pc[findall(map(p -> p ∈ bbs[i], pc.position))]
         tile_pc = Table(tile_pc, intensity = Float64.(tile_pc.intensity))
-        save_las(tile_file_base * "_$(i).las", tile_pc)
-        save_h5(tile_file_base * "_$(i).h5", tile_pc)
+        class_counts = map(c -> count(tile_pc.classification .== c), classes)
+        if count(class_counts .>= class_min) >= 3
+            save_las(tile_file_base * "_$(i).las", tile_pc)
+            # save_h5(tile_file_base * "_$(i).h5", tile_pc) 
+        end
     end
 end
     
@@ -239,7 +260,7 @@ function get_good_tiles(dir::String, good_dir::String)
         if num_building > num_pts * proportion && num_ground > num_pts * proportion && num_veg > num_pts * proportion
             @info "Found good one! File: $filename"
             save_las(joinpath(good_dir, filename), pc)
-            save_h5(joinpath(good_dir, filename[1:end - 4] * ".h5"), Table(pc, intensity = Float64.(pc.intensity)))
+            # save_h5(joinpath(good_dir, filename[1:end - 4] * ".h5"), Table(pc, intensity = Float64.(pc.intensity)))
         end
     end
 end
